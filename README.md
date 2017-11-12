@@ -7,7 +7,7 @@
 2. [API Index](vchunk.md)
 3. [API Details](vchunk.md#module_VCHUNK)
 4. [VCHUNK test](vchunk-test.md)
-5. [NPM](https://www.npmjs.com/package/@dvermeir/vchunk)
+5. [NPM](https://www.npmjs.com/package/vchunk)
 
 <a id="Overview" href="#Top">
 
