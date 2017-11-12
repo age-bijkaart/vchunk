@@ -1,6 +1,6 @@
 <a id="Top" href="#Top"/>
 
-# Virtual Chunks Version 0.1.N
+# Virtual Chunks Version 1.0.N
 
 
 1. [Overview](#Overview)
