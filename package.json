@@ -1,0 +1,29 @@
+{
+  "name": "vchunk",
+  "version": "1.0.0",
+  "description": "A virtual chunk is an array of chunks (Buffers)",
+  "main": "vchunk.js",
+  "scripts": {
+    "test": "make check"
+  },
+  "keywords": [],
+  "author": "Dirk Vermeir <dirk.vermeir.be@gmail.com>",
+  "license": "MIT",
+  "repository": {},
+  "dependencies": {
+    "@dvermeir/cbuf": "^0.1.4",
+    "assert": "^1.4.1",
+    "babel-runtime": "^6.26.0",
+    "cbuf": "^1.0.2"
+  },
+  "devDependencies": {
+    "babel-cli": "^6.26.0",
+    "babel-eslint": "^8.0.2",
+    "babel-plugin-transform-runtime": "^6.23.0",
+    "babel-preset-es2015": "^6.24.1",
+    "babel-preset-es2017": "^6.24.1",
+    "babel-preset-stage-0": "^6.24.1",
+    "eslint": "^4.11.0",
+    "jsdoc": "^3.5.5"
+  }
+}

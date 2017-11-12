@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+
+/** @name vchunk-test
+ * @description Test program for the [VCHUNK](./README.md) 
+ * (virtual chunk) module.
+ */
+'use strict';
+
+import CBUF from '@dvermeir/cbuf';
+
+import { VChunk, VCursor} from './vchunk.js';
+import { assert, assertx, nerrors} from './assert-test.js';
+
+try {
+  let vchunk = VChunk.create(3);
+  let cursor = VCursor.create(vchunk);
+  assert(VCursor.eof(cursor), 'cursor@EOF', 'cursor not at EOF!');
+  assert(VCursor.vindex(cursor) === 0, 
+      'cursor.vindex === 0', 
+      'cursor.vindex !== 0');
+
+  const initial_buf = Buffer.from([1,1]);
+  VChunk.push(vchunk, initial_buf);
+
+  assert(VCursor.read_int16(cursor) === 257, 
+      'initial vcursor.read_int16: 257',
+      'initial vcursor.read_int16: wrong');
+  assert(VCursor.vindex(cursor) === 2, 
+      'initial: vcursor.vindex: 2',
+      'initial: vcursor.vindex wrong');
+  assert(VChunk.begin(vchunk) === 0,
+      'initial: vchunk.begin: 0',
+      'initial: vchunk.begin wrong');
+  assert(VChunk.end(vchunk) === initial_buf.length,
+      'initial: vchunk.end === initial_buf.length',
+      'initial: vchunk.end !== initial_buf.length');
+  assert(CBUF.last(vchunk).buffer  === initial_buf, 
+      'initial: vchunk.last.buffer === initial_buf',
+      'initial: vchunk.last.buffer !== initial_buf');
+  assert(CBUF.last(vchunk).offset === 0, 
+      'initial: vchunk.last.offset === 0',
+      'initial: vchunk.last.offset !== 0');
+
+  const buffers = [
+    Buffer.from([1,0]),
+    Buffer.from([0,0,'a'.charCodeAt(0)&255,'b'.charCodeAt(0)&255]),
+    Buffer.from(['b'.charCodeAt(0)&255, 'a'.charCodeAt(0)&255, 0,
+        'c'.charCodeAt(0)&255])
+  ];
+
+  buffers.forEach((b) => VChunk.push(vchunk, b));
+
+  /** what happens: ('bi' stands for initial_buf, b[j] for buffers[j])
+    the numbers begin, end, last are for the circular buffer
+     [ bi, undef, undef ] begin = 0, end = 1, last = 0
+  => [ bi, b[0], undef ] begin = 0, end = 2, last = 1
+  => [ bi, b[0], b[1] ] begin = 0, end = 0, last = 2
+  => [ b[2], b[0], b[1] ] begin = 1, end = 1, last = 0
+  */
+
+  const total_length =
+    buffers.reduce( (total_length, b)=> (total_length + b.length), 0);
+
+  // console.log(`full vchunk = ${VChunk.tostring(vchunk)}`);
+  assert(VChunk.begin(vchunk) === initial_buf.length, 
+      'vchunk.begin === initial_buf.length',
+      'vchunk.begin !== initial_buf.length');
+
+  assert(VChunk.end(vchunk) === VChunk.begin(vchunk) + total_length,
+      'vchunk.end === vchunk.begin + total_length',
+      'vchunk.end !== vchunk.begin + total_length');
+
+  assert(CBUF.last(vchunk).offset === 8, 
+      'vchunk.last.offset === 8',
+      'vchunk.last.offset !== 8');
+
+  assert(CBUF.last(vchunk).buffer === buffers[2] , 
+      'vchunk.last.buffer === buffers[2]',
+      'vchunk.last.buffer !== buffers[2]');
+
+  assert(VCursor.read_int32(cursor) === 16777216, 
+      'cursor.read_int32 === 16777216',
+      'cursor.read_int32 !== 16777216');
+
+  assert(VCursor.vindex(cursor) === 6, 
+      'cursor.vindex === 6',
+      'cursor.vindex !== 6');
+
+  assert(VCursor.read_cstring(cursor) === 'abba',
+      'cursor.read_cstring === "abba"',
+      'cursor.read_cstring !== "abba"');
+
+  assert(VCursor.read_char(cursor) === 'c',
+      'cursor.read_char === "c" ',
+      'cursor.read_char !== "c" ');
+
+  assert(VCursor.vindex(cursor) === VChunk.end(vchunk), 
+      'cursor.vindex === vchunk.end',
+      'cursor.vindex !== vchunk.end');
+
+  assert(VCursor.eof(cursor), 'cursor at EOF', 'cursor not at EOF');
+
+  try { 
+    VCursor.read_char(cursor);
+    assert(false, '', 'cursor at EOF: read_char does not throw');
+  }
+  catch (e) {
+    assert(true, `expected exception: ${e.name}: ${e.message}`,'');
+  }
+
+  // make a cursor pointing into oldest chunk
+  let n_cursor = VCursor.create(vchunk);
+  // console.log(`new n_cursor: ${VCursor.tostring(n_cursor)}`);
+
+  try { 
+    VChunk.push(vchunk, Buffer.from([1,2,3,4,5,6,7,8,9,10]));
+    assert(false, '', 'cursor at EOF: shift of busy chunk did not throw');
+  }
+  catch (e) {
+    assert(true, `expected exception: ${e.name}: ${e.message}`,'');
+  }
+
+  console.log('nerrors = ', nerrors());
+  process.exit(nerrors);
+}
+catch (e) {
+  console.error('exception: ', e.name, ': ', e.message);
+  console.error(e);
+  process.exit(1);
+}
+

@@ -1,0 +1,638 @@
+/**
+ * @file Virtual Chunk
+ * @description View an array of chunks as one chunk
+ */
+'use strict';
+
+import CBUF from '@dvermeir/cbuf';
+
+function error(name, message) {
+  let e = new Error(message);
+  e.name = name;
+  return e;
+}
+
+/** Name (using a 
+ * [Symbol](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol)) 
+ * of a data property for a virtual chunk, in addition to those of CBUF. 
+ * @example
+ * import CBUF from '@dvermeir/cbuf';
+ *
+ * const CURSORS = Symbol('cursors');
+ *
+ * function vchunk_create(capacity) {
+ *   let vchunk = CBUF.create(capacity);
+ *   vchunk[CURSORS] = new Set();
+ *   return vchunk;
+ * }
+ *
+ */
+const CURSORS = Symbol('cursors');
+
+/** Name (using a 
+ * [Symbol](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol)) of data properties of vchunk cursors objects.
+```javascript
+const VINDEX = Symbol('vindex');
+const VCHUNK = Symbol('vchunk');
+```
+ *
+ * - VINDEX is the 'virtual index' into the virtual chunk on which the cursor 
+ *   is defined
+ * - VCHUNK is an immutable reference to the virtual chunk on which the cursor
+ *   is defined
+ *
+ *
+ * @example
+ * function vcursor_create(vchunk) {
+ *   const c = Object.defineProperty(
+ *    { [VINDEX]: vchunk_begin(vchunk) }, 
+ *    VCHUNK, { enumerable: true, value: vchunk, configurable: false, writable: false }
+ *   );
+ *   vchunk[CURSORS].add(c);
+ *   return c;
+ * }
+ */
+const VINDEX = Symbol('vindex');
+const VCHUNK = Symbol('vchunk');
+
+/** Create a new empty virtual chunk. Any cursor `c` that is defined on
+ * an empty `vchunk` will point to EOF, i.e. `vcursor_eof(c)`
+ * will be true.
+ *
+ * A virtual chunk is actually just a `CBUF` (circular buffer) with one extra
+ * `CURSORS` data attribute which refers to the set of `VCursor` cursors that
+ * point to data in the chunk.
+ * @see vcursor_eof
+ * @see vcursor_create
+ * @param {Integer} capacity of the underlying circular buffer
+ * @returns {VChunk} newly created empty virtual chunk
+ *
+ * @example
+ * import CBUF from '@dvermeir/cbuf';
+ * import {VChunk, VCursor} from '@dvermeir/vchunk';
+ *
+ * const initial_buf = Buffer.from([1,1]);
+ * vchunk = VChunk.create(initial_buf, 3);
+ */
+const vchunk_create = (capacity) => {
+  let vchunk = CBUF.create(capacity);
+  vchunk[CURSORS] = new Set();
+  return vchunk;
+}
+
+/** Push/append a new buffer/chunk on/to a virtual chunk.
+ * @param {VChunk} vchunk on which the buffer will be pushed
+ * @param {Buffer} buffer a nodejs 
+ * [`Buffer`](https://nodejs.org/api/buffer.html#buffer_buffer) 
+ * @returns {Boolean} true iff the operation succeeded
+ * @throws {Error} with name 'CURSORS' if
+ * `vchunk` is full and a shift operation to make room is impossible because
+ * there is at least one cursor pointing into the oldest chunk (that would be
+ * shifted).
+ * @see vcursor_create
+ *
+ * @example
+ *  import net from 'net';
+ *  import { VChunk, VCursor } from  'vchunk';
+ *
+ *  const conn = net.createConnection(path);
+ *  let chunks = vchunk_create(10);
+ *
+ *  conn.on('data', function(buffer) {
+ *    // buffer is a Buffer of data read from the socket
+ *    VChunk.push(chunks, buffer)) 
+ *    ..
+ *  }
+ *  ...
+ */
+const vchunk_push = (vchunk, buffer) => {
+  if (CBUF.full(vchunk)) {
+    for (const c of vchunk[CURSORS]) 
+      if ( vcursor_in_chunk_with_index(c, c[VCHUNK][CBUF.BEGIN]) ) 
+        throw error('CURSORS', `VChunk = ${vchunk_tostring(vchunk)}`);
+    CBUF.shift(vchunk); 
+  }
+  return CBUF.push(vchunk, ({offset: vchunk_end(vchunk), buffer: buffer}));
+}
+
+/** Delete a cursor on a virtual chunk. Note that it is assumed that the
+ * parameter cursor `c` is indeed one of the cursors of the other parameter
+ * `vchunk`. If not, the function will return false.
+ * @param {VChunk} vchunk the virtual chunk that the cursor points into
+ * @param {VCursor} c the cursor to be deleted
+ * @returns {Boolean} true iff there was a delete from the set 
+ *  `vchunk[CURSORS]`.
+ * @example
+ * // The trivial implementation
+ *  const vchunk_del_cursor = (vchunk, c) => ( vchunk[CURSORS].delete(c) );
+ * @see [Set.delete] (https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/delete)
+ */
+const vchunk_del_cursor = (vchunk, c) => ( vchunk[CURSORS].delete(c) );
+
+/** The virtual index of the beginning of a virtual chunk. Upon creation, this
+ * will be 0 and it will remain 0 as long as the very first buffer that was
+ * pushed onto `vchunk` has not been shifted out to make room for new buffers.
+ *
+ * After that,  as older chunks are shifted out to make room for new ones, 
+ * this index will increase. I.e. the indices associated with
+ * shifted chunks are not reused. 
+ *
+ * Thus, a virtual chunk represents a sliding window on a stream of buffers
+ * coming in via `vchunk_push` and leaving the window on the other side via
+ * `CBUF.shift` which is called by `vchunk_push` when the underlying circular
+ * buffer is full.
+ * @param {VChunk} vchunk the virtual chunk to find the start index of
+ * @return {Integer} the `offset` of the oldest buffer in `vchunk` or 0 if
+ * `vchunk` is empty.
+ */
+const vchunk_begin = (vchunk) =>
+  CBUF.empty(vchunk) ? 0 : vchunk[CBUF.DATA][vchunk[CBUF.BEGIN]].offset;
+
+/** The `end` virtual index of a virtual chunk. If nonempty, it is equal
+ * to the maximal valid virtual index in the vchunk + 1.
+ * @param {VChunk} vchunk the virtual chunk to find the end index of
+ * @returns {Integer} the 'end virtual index' of `vchunk` or 0. In both cases
+ * `vchunk_at(vchunk_end(v)) === undefined`.
+ */
+const vchunk_end = (vchunk) => { 
+      const last = CBUF.last(vchunk); // undefined if empty
+      return last ? last.offset + last.buffer.length : 0; 
+}
+
+/** A string representation of a virtual chunk.
+ * @param {VChunk} vchunk the virtual chunk to represent in a string
+ * @param {Boolean} short if false, the cursors associated with the virtual
+ *  chunk will also be shown in the returned string.
+ * @returns {String} a string representation of `vchunk`
+ */
+const vchunk_tostring = (vchunk, short = false) => { 
+  let s =  `VChunk [ ${vchunk_begin(vchunk)} ..  ${vchunk_end(vchunk)}[, `;
+  if (! short) {
+    s += 'Cursors {'
+    for (const c of vchunk[CURSORS]) {
+      s += vcursor_tostring(c, true);
+    }
+    s += '}'
+  }
+  return s + ` ${CBUF.tostring(vchunk)}`;
+}
+
+
+/** 
+ * Create a virtual cursor for a virtual chunk. The association between a 
+ * cursor an its virtual chunk is immutable.
+ * @param {VChunk} vchunk the virtual chunk that the new cursor will point into
+ * @returns {VCursor} the new cursor pointing to the beginning of the data of vchunk
+ * @see vchunk_begin
+ *
+ */
+const vcursor_create = (vchunk) => {
+  const c = Object.defineProperty(
+      { [VINDEX]: vchunk_begin(vchunk) }, 
+      VCHUNK,
+      { enumerable: true, value: vchunk, configurable: false, writable: false }
+  );
+  vchunk[CURSORS].add(c);
+  return c;
+}
+
+/**
+ * Clone a virtual cursor. This might be useful to make a backup copy at a
+ * certain position to fall back to if parsing further input fails.
+ * @param {VCursor} c the cursor to be cloned
+ * @return {VCursor} a shallow copy of `c`, made using
+ * [Object.assign](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign)
+ */
+const vcursor_clone = (c) => ( Object.assign({}, c) );
+
+/**
+ * Check whether the cursor is a `EOF`, i.e. not pointing at valid data.
+ * @param {VCursor} c the cursor to be checked
+ * @return {Boolean} true iff the cursor `c`  does not point to valid data
+ */
+const vcursor_eof = (c) => (c[VINDEX] >= vchunk_end(c[VCHUNK])); 
+
+/**
+ * This function is not exported. It checks whether the cursor points do data
+ * belonging to a particular chunk `{offset:Integer, buffer:Buffer}` in its
+ * underlying `VChunk`.
+ *
+ * @param {VCursor} c the cursor to be checked
+ * @param {Chunk} a element `chunk` of the `c[VCHUNK]` virtual chunk 
+ * @returns {Boolean} true iff `c` points to the Buffer associated with the given chunk
+ * @see vcursor_create
+ */
+const vcursor_in_buffer = (c, chunk) =>
+        ( c[VINDEX] >= chunk.offset ) &&
+        ( c[VINDEX] < ( chunk.offset + chunk.buffer.length ) );
+
+/**
+ * This function is not exported. It checks whether the cursor points do data
+ * belonging to a the chunk at a certain position (`index`) in the 
+ * underlying `VChunk`.
+ *
+ * @param {VCursor} c the cursor to be checked
+ * @param {Integer} chunk_index an index in the circular buffer underlying
+ * `c[VCHUNK]`.
+ * @returns {Boolean} true iff `c` points to the Buffer associated with the chunk a
+ * position `chunk_index` in `c[VCHUNK]`, the `VChunk` associated with `c`.
+ * @see vcursor_create
+ */
+const vcursor_in_chunk_with_index = 
+  (c, chunk_index) => vcursor_in_buffer(c, c[VCHUNK][CBUF.DATA][chunk_index]); 
+
+/** 
+ *  This function is not exported.
+ *  For a cursor `c`, it returns the index `i` in the circular
+ *  buffer `c[VCHUNK]` such that `c` points into the `i`'th chunk's buffer.
+ *
+ * @param {VCursor} c the cursor for which the index will be found
+ * @returns {undefined} iff `CBUF.empty(c[VCHUNK])`.
+ * @returns {Integer} `i` such that 
+ * 
+ * `v[i].offset <= c[VINDEX] < v[i].offset + v[i].buffer.length`
+ *
+ * where
+ *
+ * `v = c[VCHUNK]` is the virtual chunk associated with `c`.
+ */
+const vcursor_cindex = (c) => {
+    const vchunk = c[VCHUNK];
+    if ( CBUF.empty(vchunk) )
+      return undefined;
+    const data = vchunk[CBUF.DATA];
+    let pop = vchunk[CBUF.POP];
+    let chunk_index = vchunk[CBUF.BEGIN];
+    let chunk = undefined;
+    while ( chunk = data[chunk_index], 
+        pop-- && 
+        ( c[VINDEX] >= ( chunk.offset + chunk.buffer.length) ) 
+        ) {
+      if (pop)
+        chunk_index = CBUF.inc(vchunk, chunk_index);
+      // else (!pop) the previous chunk_index was the last one, so we
+      // are obliged to return that (previous) one, which will be EOF
+    }
+    return chunk_index;
+  };
+
+/** 
+ *  This function is not exported.
+ *  For a cursor `c`, it returns the chunk `{offset, buffer}` from 
+ *  `c[VCHUNK]` such that `c` points into the chunk's buffer.
+ *
+ * @param {VCursor} c the cursor for which the chunk will be found
+ * @returns {Chunk} `chunk` from `c[VCHUNK]` such that 
+ *
+ * `chunk.offset <= c[VINDEX] < chunk.offset +  chunk.buffer.length`
+ *
+ */
+const vcursor_chunk = (c) =>
+  CBUF.empty(c[VCHUNK]) ? undefined : c[VCHUNK][CBUF.DATA][vcursor_cindex(c)];
+
+/** Move a cursor `size` positions forward.
+ * @param {VCursor} c the cursor to move
+ * @param {Integer} size the number of bytes to skip
+ * @returns {Integer} the new index `c[VINDEX]` of `c`
+ */
+const vcursor_move = (c, size) => ( c[VINDEX] += size );
+
+/**
+ * Return the data (byte) that the cursor is pointing to.
+ * @param {VCursor} c a cursor on some virtual chunk
+ * @returns {Byte} the byte that the cursor is pointing to 
+ * @throws {Error} with name `EOF` if c is at EOF
+ * @see vcursor_eof
+ * @see vcursor_create
+ */
+const vcursor_at = (c) => {
+  if ( vcursor_eof(c) )
+    throw error('EOF', `vcursor_at(${vcursor_tostring(c)})`)
+  const chunk_index = vcursor_cindex(c);
+  const chunk = c[VCHUNK][CBUF.DATA][chunk_index];
+  return chunk.buffer[c[VINDEX] - chunk.offset];
+}
+
+/** 
+ * Return the byte the cursor is pointing to and move the cursor 1 step
+ * forward. This can be trivially implemented:
+```javascript
+  const vcursor_atmove = (c) =>
+    { const b = vcursor_at(c); vcursor_move(c, 1); return b; }
+```
+ * @param {VCursor} c the cursor to read and move
+ * @return {Byte} the byte the cursor was pointing to before it moved
+ */
+const vcursor_atmove = (c) =>
+  { const b = vcursor_at(c); vcursor_move(c, 1); return b; }
+
+/** A string representation of a virtual cursor.
+ * @param {VCursor} c the cursor to represent in a string
+ * @param {Boolean} short if false, the virtual chunk `c[VCHUNK]` will also
+ *   be shown in the returned string.
+ * @returns {String} a string representation of `c`
+ */
+const vcursor_tostring = (c, short = false) => { 
+  const cc = vcursor_chunk(c);
+  if (cc)
+    return `Cursor ${c[VINDEX]} at ` +
+      `${vcursor_cindex(c)}([${cc.offset} .. ${cc.offset + cc.buffer.length}[,` +
+      ` => ${( vcursor_eof(c) ? 'EOF' : vcursor_at(c) )})` +
+      ` ${(short ? ' ' : vchunk_tostring(c[VCHUNK]))}`;
+  return `Cursor ${c[VINDEX]} at ` +
+    `${vcursor_cindex(c)}([0 .. 0[,` +
+    ` => ${( vcursor_eof(c) ? 'EOF' : vcursor_at(c) )})` +
+    ` ${(short ? ' ' : vchunk_tostring(c[VCHUNK]))}`;
+}
+
+/** VCursor read function.
+ * Read a 32bit integer in
+ * [MSB](https://en.wikipedia.org/wiki/Most_significant_bit) format.
+ * Move the cursor to point to the byte after the integer (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @return {Integer} i the integer read
+ */
+const vcursor_read_int32 = (c) => { 
+  return (vcursor_atmove(c) << 24) | (vcursor_atmove(c) << 16) |
+    (vcursor_atmove(c) << 8) | vcursor_atmove(c); 
+}
+
+/** VCursor read function.
+ * Read a 16bit integer in
+ * [MSB](https://en.wikipedia.org/wiki/Most_significant_bit) format.
+ * Move the cursor to point to the byte after the integer (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @return {Integer} i the integer read
+ */
+const vcursor_read_int16 = (c) => { 
+  return (vcursor_atmove(c) << 8) | vcursor_atmove(c); 
+}
+
+/** VCursor read function.
+ * Read a 'C string', i.e. a sequence of characters followed by a terminating 
+ * 0 byte.
+ * Move the cursor to point to the byte after the string (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @return {string} the C string as a JS `string` (not a `String` object)
+ */
+const vcursor_read_cstring = (cursor) => { 
+  let c; 
+  let s=''; 
+  while (c=vcursor_atmove(cursor)) 
+    s += String.fromCharCode(c); 
+  return s; 
+}
+
+/** VCursor read function.
+ * Read a given number of characters.
+ * Move the cursor to point to the byte after these characters (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @param {Integer} n the number of characters to read
+ * @return {Array} of size `n` containing the sequence of characters read
+ * Each character is obtained by calling [String.fromCharCode](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode)
+ * on each read byte.
+ * @see [`String.fromCharCode`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode) for limitation on valid caracters, this function really works only with 'ascii' or 'latin1', i.e. 1-byte characters.
+ */
+const vcursor_read_chars = (cursor, n) => { 
+  let a = new Array(n); 
+  for (let i=0; i<n; ++i) 
+    a[i] = String.fromCharCode(vcursor_atmove(cursor)); 
+  return a; 
+}
+
+/** VCursor read function.
+ * Read a given number of bytes.
+ * Move the cursor to point to the byte after these characters (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @param {Integer} n the number of bytes to read
+ * @return {Array} of size `n` containing the sequence of bytes read
+ * @see vcursor_read_chars
+ */
+const vcursor_read_bytes = (cursor, n) => { 
+  let a = new Array(n); 
+  for (let i=0; i<n; ++i) 
+    a[i] = vcursor_atmove(cursor); 
+  return a; 
+}
+
+/** VCursor read function.
+ * Read a single character and advance the cursor by 1 position.
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @return {string} of size `1` containing the character read
+ * The character is obtained by calling [String.fromCharCode](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode)
+ * on the read byte.
+ */
+const vcursor_read_char = (c) => String.fromCharCode(vcursor_atmove(c));
+
+/** VCursor read function.
+ * Read a single byte and advance the cursor by 1 position.
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @return {Integer} containing the byte read
+ */
+const vcursor_read_byte = (c) => vcursor_atmove(c);
+
+/** VCursor read function.
+ * Read a given number of characters as a JS `string`.
+ * Move the cursor to point to the byte after these characters (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @param {Integer} size the number of characters to read
+ * @return {string} of length `n` containing the sequence of characters read
+ * Each character is obtained by calling [String.fromCharCode](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode)
+ * on each read byte.
+ */
+const vcursor_read_string = (c, size) => {
+  let s=''; 
+  for (let i=0; i<size; ++i) 
+    s += String.fromCharCode(vcursor_atmove(c)); 
+  return s; 
+}
+
+/** VCursor read function.
+ * Read a string and convert (parse) it to an integer.
+ * Move the cursor to point to the byte after the characters read (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @param {Integer} size the number of characters to read
+ * @return {Integer} the result of calling
+ * [`parseInt`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt)
+ * with base `10` on the result of `vcursor_read_string`
+ * @see vcursor_read_string
+ */
+const vcursor_read_str_int = (c, size) =>
+  parseInt(vcursor_read_string(c, size),10);
+
+/** VCursor read function.
+ * Read a string and convert (parse) it to a JS 
+ * [`Date`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date) object.
+ * Move the cursor to point to the byte after the characters read (or EOF).
+ * @see vcursor_eof
+ * @param {VCursor} c the cursor used for reading
+ * @param {Integer} size the number of characters to read
+ * @return {Date} the result of calling
+ * [`new Date(datestr)`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date) 
+ * where `datestr` is the result of calling `vcursor_read_string(c, size)`
+ * @see vcursor_read_string
+ */
+const vcursor_read_date = (c, size) => new Date(vcursor_read_string(c, size));
+
+
+/** 
+ * @description. 
+ * An object `VChunk` containing exported functions that operate on a virtual
+ * chunk.
+```javascript
+const VChunk = {
+  create: vchunk_create, 
+  push: vchunk_push, 
+  del_cursor: vchunk_del_cursor,
+
+  cursors: (vchunk) => (vchunk[CURSORS]),
+  begin: vchunk_begin,
+  end: vchunk_end, 
+
+  tostring: vchunk_tostring, 
+};
+```
+ */
+const VChunk = {
+  create: vchunk_create, 
+  push: vchunk_push, 
+  del_cursor: vchunk_del_cursor,
+
+  cursors: (vchunk) => (vchunk[CURSORS]),
+  begin: vchunk_begin,
+  end: vchunk_end, 
+
+  tostring: vchunk_tostring, 
+};
+
+/** 
+ * @description. 
+ * An object `VCursor` containing exported functions that operate on a virtual
+ * cursor.
+```javascript
+const VCursor = {
+  create: vcursor_create, 
+  vindex: ((cursor) => (cursor[VINDEX])),
+  vchunk: ((cursor) => (cursor[VCHUNK])),
+  clone: vcursor_clone,
+  eof: vcursor_eof,
+  
+  move: vcursor_move,
+
+  at: vcursor_at,
+  atmove: vcursor_atmove,
+
+  read_int32: vcursor_read_int32,
+  read_int16: vcursor_read_int16,
+  read_cstring: vcursor_read_cstring,
+  read_chars: vcursor_read_chars,
+  read_char: vcursor_read_char,
+  read_bytes: vcursor_read_bytes,
+  read_byte: vcursor_read_byte,
+  read_string: vcursor_read_string,
+  read_date: vcursor_read_date,
+  read_str_int: vcursor_read_str_int,
+
+  tostring: vcursor_tostring
+
+
+};
+```
+*/
+const VCursor = {
+  create: vcursor_create, 
+  vindex: ((cursor) => (cursor[VINDEX])),
+  vchunk: ((cursor) => (cursor[VCHUNK])),
+  clone: vcursor_clone,
+  eof: vcursor_eof,
+  
+  move: vcursor_move,
+
+  at: vcursor_at,
+  atmove: vcursor_atmove,
+
+  read_int32: vcursor_read_int32,
+  read_int16: vcursor_read_int16,
+  read_cstring: vcursor_read_cstring,
+  read_chars: vcursor_read_chars,
+  read_char: vcursor_read_char,
+  read_bytes: vcursor_read_bytes,
+  read_byte: vcursor_read_byte,
+  read_string: vcursor_read_string,
+  read_date: vcursor_read_date,
+  read_str_int: vcursor_read_str_int,
+
+  tostring: vcursor_tostring
+};
+
+/**
+ * @description
+ *
+ * The module exports 2 objects
+```javascript
+  module.exports = { VChunk, VCursor };
+```
+ * representing the operations on a virtual chunk and a cursor, respectively.
+ *
+ * @exports VChunk
+ * @exports VCursor
+ *
+ * @see VChunk
+ * @see VCursor
+```javascript
+const VChunk = {
+  create: vchunk_create, 
+  push: vchunk_push, 
+  del_cursor: vchunk_del_cursor,
+
+  cursors: (vchunk) => (vchunk[CURSORS]),
+  begin: vchunk_begin,
+  end: vchunk_end, 
+
+  tostring: vchunk_tostring, 
+};
+
+const VCursor = {
+  create: vcursor_create, 
+  vindex: ((cursor) => (cursor[VINDEX])),
+  clone: vcursor_clone,
+  eof: vcursor_eof,
+  
+  move: vcursor_move,
+
+  at: vcursor_at,
+  atmove: vcursor_atmove,
+
+  read_int32: vcursor_read_int32,
+  read_int16: vcursor_read_int16,
+  read_cstring: vcursor_read_cstring,
+  read_chars: vcursor_read_chars,
+  read_char: vcursor_read_char,
+  read_bytes: vcursor_read_bytes,
+  read_byte: vcursor_read_byte,
+  read_string: vcursor_read_string,
+  read_date: vcursor_read_date,
+  read_str_int: vcursor_read_str_int,
+
+  tostring: vcursor_tostring
+};
+```
+ *
+ *
+ * @TODO VChunk.reset which resets the offset of the first chunk to 0 and adapts
+ * all other chunks.offset and cursor.vindex by substracting old_offset 
+ * from it. VChunk.reset could for instance be called by a postgresql client after each
+ * query result.
+ *
+ * @module VCHUNK
+ */
+module.exports = { VChunk, VCursor };
