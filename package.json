@@ -1,6 +1,6 @@
 {
   "name": "vchunk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A virtual chunk is an array of chunks (Buffers)",
   "main": "vchunk.js",
   "scripts": {
