@@ -6,10 +6,25 @@
   "scripts": {
     "test": "make check"
   },
-  "keywords": [],
+  "keywords": [ 
+    "nodejs Buffer", 
+    "buffer", 
+    "circular buffer", 
+    "parse input", 
+    "read", 
+    "virtual"
+  ],
   "author": "Dirk Vermeir <dirk.vermeir.be@gmail.com>",
   "license": "MIT",
-  "repository": {},
+  "bugs": {
+    "url": "https://github.com/age-bijkaart/vchunk/issues"
+  },
+  "homepage": "https://github.com/age-bijkaart/vchunk#readme",
+
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/age-bijkaart/vchunk.git"
+  },
   "dependencies": {
     "@dvermeir/cbuf": "^0.1.4",
     "babel-runtime": "^6.26.0"
